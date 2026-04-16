@@ -8,8 +8,8 @@
 
 set -euo pipefail
 
-PYTHON="$(dirname "$0")/../.venv/bin/python"
-PYTHON="$(realpath "$PYTHON")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="${SCRIPT_DIR}/../.venv/bin/python"
 NUM_GPUS=4
 POLL_INTERVAL=30
 
