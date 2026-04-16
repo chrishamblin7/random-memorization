@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Plot per-example loss curves for random memorization experiments.
+"""Plot binned loss curves for random memorization experiments.
+
+When n_examples is large, individual per-example lines are unreadable.
+Instead, group examples into log-spaced bins (finer bins for the most
+frequently sampled examples) and plot the mean loss of each bin.
 
 Usage:
     python scripts/plot_loss_curves.py --results-dir results/<run_name>
@@ -15,6 +19,7 @@ import numpy as np
 import yaml
 
 LN2 = np.log(2.0)
+TARGET_BINS = 200
 
 
 def load_run(results_dir: Path):
@@ -25,62 +30,75 @@ def load_run(results_dir: Path):
     return cfg, metrics
 
 
-def extract_curves(metrics, example_ids, prob_of=None):
-    steps = [e["step"] for e in metrics if "per_example" in e]
-    losses = {i: [] for i in example_ids}
-    weighted_loss = []
+def _make_bin_edges(n_examples: int, target_bins: int = TARGET_BINS):
+    """Log-spaced bin edges: small bins for low-index (frequent) examples."""
+    edges = np.unique(np.geomspace(1, n_examples, num=target_bins + 1).astype(int))
+    edges[0] = 0
+    edges[-1] = n_examples
+    return edges
 
-    if prob_of is not None:
-        weights = np.array([prob_of[i] for i in example_ids])
-        weights = weights / weights.sum()
-    else:
-        weights = np.ones(len(example_ids)) / len(example_ids)
+
+def extract_binned_curves(metrics, bin_edges, prob_of, n_examples):
+    """Extract per-bin mean loss curves and a weighted-mean curve."""
+    steps = [e["step"] for e in metrics if "per_example" in e]
+    n_bins = len(bin_edges) - 1
+
+    all_probs = np.array([prob_of.get(i, 0.0) for i in range(n_examples)])
+    total_prob = all_probs.sum()
+
+    bin_mean_probs = np.zeros(n_bins)
+    for b in range(n_bins):
+        lo, hi = bin_edges[b], bin_edges[b + 1]
+        bin_mean_probs[b] = all_probs[lo:hi].mean()
+
+    bin_losses = [[] for _ in range(n_bins)]
+    weighted_loss = []
 
     for entry in metrics:
         if "per_example" not in entry:
             continue
         pe = entry["per_example"]
-        vals = []
-        for i in example_ids:
-            loss_bits = pe[str(i)]["loss"] / LN2
-            losses[i].append(loss_bits)
-            vals.append(loss_bits)
-        weighted_loss.append(np.dot(weights, vals))
 
-    return np.array(steps), losses, np.array(weighted_loss)
+        all_losses = np.zeros(n_examples)
+        for i in range(n_examples):
+            all_losses[i] = pe[str(i)]["loss"] / LN2
+
+        for b in range(n_bins):
+            lo, hi = bin_edges[b], bin_edges[b + 1]
+            bin_losses[b].append(all_losses[lo:hi].mean())
+
+        weighted_loss.append(np.dot(all_probs / total_prob, all_losses))
+
+    return np.array(steps), bin_losses, np.array(weighted_loss), bin_mean_probs
 
 
-def build_color_mapping(example_ids, results_dir, cfg):
-    probs_path = results_dir / "sampler_probs.json"
-    if probs_path.exists():
-        with open(probs_path) as f:
-            raw = json.load(f)
-        prob_of = {int(k): v for k, v in raw.items()}
-    else:
-        beta = cfg.get("beta", 1.5)
-        idx = np.array(example_ids, dtype=np.float64)
-        w = (idx + 1.0) ** (-beta)
-        w /= w.sum()
-        prob_of = dict(zip(example_ids, w.tolist()))
-
-    probs = np.array([prob_of[i] for i in example_ids])
+def build_bin_color_mapping(bin_mean_probs):
     cmap = mpl.colormaps["viridis"].reversed()
-    norm = mpl.colors.LogNorm(vmin=probs.min(), vmax=probs.max())
+    norm = mpl.colors.LogNorm(
+        vmin=bin_mean_probs[bin_mean_probs > 0].min(),
+        vmax=bin_mean_probs.max(),
+    )
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
+    return sm
 
-    return sm, prob_of
 
-
-def _add_colorbar(fig, ax, sm, example_ids, prob_of):
+def _add_colorbar(fig, ax, sm, bin_edges, bin_mean_probs):
     cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label("Example index (colored by sampling probability)")
-    sorted_by_prob = sorted(example_ids, key=lambda i: prob_of[i])
-    tick_ids = sorted_by_prob[:: max(1, len(sorted_by_prob) // 8)]
-    if sorted_by_prob[-1] not in tick_ids:
-        tick_ids.append(sorted_by_prob[-1])
-    cbar.set_ticks([prob_of[i] for i in tick_ids])
-    cbar.set_ticklabels([str(i) for i in tick_ids])
+    cbar.set_label("Example rank (colored by sampling probability)")
+    n_ticks = 8
+    idx = np.linspace(0, len(bin_mean_probs) - 1, n_ticks, dtype=int)
+    tick_probs = bin_mean_probs[idx]
+    tick_labels = []
+    for i in idx:
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        if hi - lo == 1:
+            tick_labels.append(str(lo))
+        else:
+            tick_labels.append(f"{lo}-{hi-1}")
+    valid = tick_probs > 0
+    cbar.set_ticks(tick_probs[valid])
+    cbar.set_ticklabels([l for l, v in zip(tick_labels, valid) if v])
     return cbar
 
 
@@ -93,15 +111,18 @@ def _ema(values, alpha=0.05):
 
 
 def make_static_plot(
-    steps, losses, mean_loss, example_ids, sm, prob_of, results_dir,
-    log_y=False, prefix="loss_curves", ylabel="Loss (bits)",
-    ema_alpha=0.05,
+    steps, bin_losses, mean_loss, bin_edges, bin_mean_probs, sm, results_dir,
+    log_y=False, prefix="loss_curves", ylabel="Loss (bits)", ema_alpha=0.05,
 ):
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    for i in example_ids:
-        color = sm.to_rgba(prob_of[i])
-        smoothed = _ema(np.array(losses[i]), alpha=ema_alpha)
+    n_bins = len(bin_losses)
+    for b in range(n_bins):
+        p = bin_mean_probs[b]
+        if p <= 0:
+            continue
+        color = sm.to_rgba(p)
+        smoothed = _ema(np.array(bin_losses[b]), alpha=ema_alpha)
         ax.plot(steps, smoothed, color=color, alpha=0.4, linewidth=0.5)
 
     ax.plot(steps, mean_loss, color="red", linewidth=2.5, label="Weighted mean loss")
@@ -112,7 +133,7 @@ def make_static_plot(
     ax.set_ylabel(ylabel)
     ax.legend(loc="upper right")
 
-    _add_colorbar(fig, ax, sm, example_ids, prob_of)
+    _add_colorbar(fig, ax, sm, bin_edges, bin_mean_probs)
 
     fig.tight_layout()
     suffix = "_logy" if log_y else ""
@@ -123,8 +144,9 @@ def make_static_plot(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Plot per-example loss curves")
+    parser = argparse.ArgumentParser(description="Plot binned loss curves")
     parser.add_argument("--results-dir", type=str, required=True)
+    parser.add_argument("--bins", type=int, default=TARGET_BINS)
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -139,14 +161,36 @@ def main():
         print("No per_example data found in metrics.")
         return
 
+    n_examples = len(first_pe)
     example_ids = sorted(int(k) for k in first_pe.keys())
-    sm, prob_of = build_color_mapping(example_ids, results_dir, cfg)
-    steps, losses, mean_loss = extract_curves(metrics, example_ids, prob_of)
 
-    make_static_plot(steps, losses, mean_loss, example_ids, sm, prob_of, results_dir,
-                     log_y=False, prefix="loss_curves", ylabel="Loss (bits)")
-    make_static_plot(steps, losses, mean_loss, example_ids, sm, prob_of, results_dir,
-                     log_y=True, prefix="loss_curves", ylabel="Loss (bits)")
+    probs_path = results_dir / "sampler_probs.json"
+    if probs_path.exists():
+        with open(probs_path) as f:
+            raw = json.load(f)
+        prob_of = {int(k): v for k, v in raw.items()}
+    else:
+        beta = cfg.get("beta", 1.5)
+        idx = np.arange(n_examples, dtype=np.float64)
+        w = (idx + 1.0) ** (-beta)
+        w /= w.sum()
+        prob_of = {i: float(p) for i, p in enumerate(w)}
+
+    if n_examples <= args.bins * 2:
+        bin_edges = np.arange(n_examples + 1)
+    else:
+        bin_edges = _make_bin_edges(n_examples, target_bins=args.bins)
+
+    steps, bin_losses, mean_loss, bin_mean_probs = extract_binned_curves(
+        metrics, bin_edges, prob_of, n_examples
+    )
+
+    sm = build_bin_color_mapping(bin_mean_probs)
+
+    make_static_plot(steps, bin_losses, mean_loss, bin_edges, bin_mean_probs, sm,
+                     results_dir, log_y=False)
+    make_static_plot(steps, bin_losses, mean_loss, bin_edges, bin_mean_probs, sm,
+                     results_dir, log_y=True)
 
 
 if __name__ == "__main__":

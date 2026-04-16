@@ -60,7 +60,7 @@ class ExperimentConfig:
         if self.run_name:
             return self.run_name
         n_str = f"{self.n_examples // 1000}k" if self.n_examples >= 1000 else str(self.n_examples)
-        name = f"{self.sampler_type}_N{n_str}_{self.model_type}_b{self.beta}"
+        name = f"{self.model_type}_N{n_str}_L{self.input_len}_D{self.d_ff}_b{self.beta}"
         if self.loss_type != "cross_entropy":
             name += f"_{self.loss_type}"
         name += f"_s{self.seed}"
