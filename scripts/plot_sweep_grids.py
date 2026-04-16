@@ -51,8 +51,18 @@ def load_run(results_dir):
         return None, None
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
-    with open(met_path) as f:
-        metrics = json.load(f)
+    try:
+        with open(met_path) as f:
+            metrics = json.load(f)
+    except json.JSONDecodeError:
+        raw = met_path.read_text()
+        last_close = raw.rfind("}]")
+        if last_close == -1:
+            return None, None
+        try:
+            metrics = json.loads(raw[: last_close + 2])
+        except json.JSONDecodeError:
+            return None, None
     return cfg, metrics
 
 
