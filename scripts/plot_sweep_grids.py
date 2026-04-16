@@ -66,22 +66,15 @@ def load_run(results_dir):
     return cfg, metrics
 
 
-def extract_weighted_mean(metrics, n_examples, prob_of):
-    all_probs = np.array([prob_of.get(i, 0.0) for i in range(n_examples)])
-    total_prob = all_probs.sum()
-    if total_prob == 0:
-        total_prob = 1.0
-
+def extract_agg_curve(metrics):
+    """Fast path: just pull aggregate loss from metrics (no per-example iteration)."""
     steps = []
-    weighted = []
+    losses = []
     for entry in metrics:
-        if "per_example" not in entry:
-            continue
-        pe = entry["per_example"]
-        steps.append(entry["step"])
-        losses = np.array([pe[str(i)]["loss"] / LN2 for i in range(n_examples)])
-        weighted.append(np.dot(all_probs / total_prob, losses))
-    return np.array(steps), np.array(weighted)
+        if "agg_loss" in entry:
+            steps.append(entry["step"])
+            losses.append(entry["agg_loss"] / LN2)
+    return np.array(steps), np.array(losses)
 
 
 def extract_binned(metrics, n_examples, prob_of, target_bins=TARGET_BINS):
@@ -99,16 +92,15 @@ def extract_binned(metrics, n_examples, prob_of, target_bins=TARGET_BINS):
         lo, hi = bin_edges[b], bin_edges[b + 1]
         bin_mean_probs[b] = all_probs[lo:hi].mean()
 
-    steps = []
+    eval_entries = [e for e in metrics if "per_example" in e]
+    steps = [e["step"] for e in eval_entries]
+
     bin_losses = [[] for _ in range(n_bins)]
     weighted = []
 
-    for entry in metrics:
-        if "per_example" not in entry:
-            continue
+    for entry in eval_entries:
         pe = entry["per_example"]
-        steps.append(entry["step"])
-        all_l = np.array([pe[str(i)]["loss"] / LN2 for i in range(n_examples)])
+        all_l = np.array([pe[str(i)]["loss"] for i in range(n_examples)]) / LN2
         for b in range(n_bins):
             lo, hi = bin_edges[b], bin_edges[b + 1]
             bin_losses[b].append(all_l[lo:hi].mean())
@@ -171,12 +163,8 @@ def plot_grid(runs, held_axis, held_value, row_values, col_values,
                 continue
 
             rdir, cfg, metrics = runs[key]
-            n_examples = cfg.get("n_examples", 50000)
-            prob_of = get_prob_of(rdir, cfg, n_examples)
 
-            steps, bin_losses, weighted, bin_edges, bin_mean_probs = extract_binned(
-                metrics, n_examples, prob_of
-            )
+            steps, agg_loss = extract_agg_curve(metrics)
 
             if len(steps) == 0:
                 ax.text(0.5, 0.5, "No eval data", ha="center", va="center",
@@ -184,22 +172,9 @@ def plot_grid(runs, held_axis, held_value, row_values, col_values,
                 ax.set_title(f"{row_label}={rv}, {col_label}={cv}", fontsize=9)
                 continue
 
-            cmap = mpl.colormaps["viridis"].reversed()
-            valid_probs = bin_mean_probs[bin_mean_probs > 0]
-            if len(valid_probs) == 0:
-                ax.set_title(f"{row_label}={rv}, {col_label}={cv}", fontsize=9)
-                continue
-            norm = mpl.colors.LogNorm(vmin=valid_probs.min(), vmax=valid_probs.max())
-
-            for b in range(len(bin_losses)):
-                p = bin_mean_probs[b]
-                if p <= 0:
-                    continue
-                color = cmap(norm(p))
-                smoothed = _ema(np.array(bin_losses[b]), alpha=0.05)
-                ax.plot(steps, smoothed, color=color, alpha=0.35, linewidth=0.4)
-
-            ax.plot(steps, weighted, color="red", linewidth=1.5)
+            smoothed = _ema(agg_loss, alpha=0.1)
+            ax.plot(steps, smoothed, color="royalblue", linewidth=1.5)
+            ax.plot(steps, agg_loss, color="royalblue", alpha=0.2, linewidth=0.5)
 
             if scale == "loglog":
                 ax.set_xscale("log")
