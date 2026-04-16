@@ -35,6 +35,8 @@ class ExperimentConfig:
     batch_size: int = 512
     eval_every: int = 1000
     checkpoint_every: int = 10000
+    lr_warmup_steps: int = 1000
+    lite_metrics: bool = True
 
     # --- Infrastructure ---
     seed: int = 42

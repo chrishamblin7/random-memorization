@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 import sys
 import time
@@ -19,6 +20,13 @@ from .utils import set_seed, sync_to_gcs
 EVAL_BATCH_SIZE = 4096
 
 
+def _cosine_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> float:
+    if step < warmup_steps:
+        return peak_lr * step / max(warmup_steps, 1)
+    progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+    return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
 def _compute_loss(logits: torch.Tensor, targets: torch.Tensor, loss_type: str,
                   reduction: str = "mean") -> torch.Tensor:
     """Compute loss over output positions.
@@ -35,8 +43,12 @@ def _compute_loss(logits: torch.Tensor, targets: torch.Tensor, loss_type: str,
 
 
 def evaluate(model, data: RandomMemorizationData, device: str,
-             loss_type: str = "cross_entropy"):
-    """Evaluate on ALL examples. Returns (per_example, agg_acc, agg_loss)."""
+             loss_type: str = "cross_entropy", full: bool = True):
+    """Evaluate on ALL examples.
+
+    If full=True, returns (per_example_dict, agg_acc, agg_loss).
+    If full=False (lite mode), returns (None, agg_acc, agg_loss).
+    """
     n = data.n_examples
     output_len = data.output_len
 
@@ -62,15 +74,18 @@ def evaluate(model, data: RandomMemorizationData, device: str,
 
     model.train()
 
+    agg_acc = per_correct.float().mean().item()
+    agg_loss = per_loss.mean().item()
+
+    if not full:
+        return None, agg_acc, agg_loss
+
     per_example = {}
     for i in range(n):
         per_example[i] = {
             "loss": per_loss[i].item(),
             "acc": per_correct[i].item(),
         }
-
-    agg_acc = per_correct.float().mean().item()
-    agg_loss = per_loss.mean().item()
     return per_example, agg_acc, agg_loss
 
 
@@ -122,6 +137,10 @@ def train(cfg: ExperimentConfig):
     t0 = time.time()
     try:
         for step in range(start_step, cfg.num_steps + 1):
+            lr = _cosine_lr(step, cfg.lr_warmup_steps, cfg.num_steps, cfg.lr)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+
             x, targets = data.sample_batch(sampler, rng, cfg.batch_size, device)
             logits = model(x)
             loss = _compute_loss(logits, targets, cfg.loss_type)
@@ -131,10 +150,14 @@ def train(cfg: ExperimentConfig):
             optimizer.step()
 
             if step % 100 == 0:
-                wandb.log({"train/loss": loss.item()}, step=step)
+                wandb.log({"train/loss": loss.item(), "lr": lr}, step=step)
 
             if step % cfg.eval_every == 0:
-                per_example, agg_acc, agg_loss = evaluate(model, data, device, cfg.loss_type)
+                is_final = (step == cfg.num_steps)
+                do_full = (not cfg.lite_metrics) or is_final
+                per_example, agg_acc, agg_loss = evaluate(
+                    model, data, device, cfg.loss_type, full=do_full
+                )
 
                 log_dict = {"eval/loss": agg_loss, "eval/acc": agg_acc}
                 wandb.log(log_dict, step=step)
@@ -144,15 +167,16 @@ def train(cfg: ExperimentConfig):
                     "train_loss": loss.item(),
                     "agg_acc": agg_acc,
                     "agg_loss": agg_loss,
-                    "per_example": {str(i): v for i, v in per_example.items()},
                 }
+                if per_example is not None:
+                    entry["per_example"] = {str(i): v for i, v in per_example.items()}
                 metrics_log.append(entry)
 
                 elapsed = time.time() - t0
                 print(
                     f"[{elapsed:7.1f}s] step {step:>6d}  "
                     f"train_loss={loss.item():.4f}  "
-                    f"acc={agg_acc:.4f}  loss={agg_loss:.4f}"
+                    f"acc={agg_acc:.4f}  loss={agg_loss:.4f}  lr={lr:.6f}"
                 )
 
                 _save_metrics(metrics_log, run_dir)

@@ -1,0 +1,27 @@
+n_examples: 50000
+input_len: 128
+output_len: 1
+input_vocab_size: 2
+output_vocab_size: 2
+data_seed: 0
+
+beta: 1.5
+sampler_type: power_law
+
+model_type: mlp
+d_ff: 256
+
+lr: 0.001
+weight_decay: 0.0
+loss_type: cross_entropy
+num_steps: 200000
+batch_size: 2048
+eval_every: 500
+checkpoint_every: 10000
+lr_warmup_steps: 1000
+lite_metrics: true
+
+seed: 42
+wandb_project: random-memorization
+gcs_bucket: /cloud/misc/chris/random-memorization/
+resume: true
