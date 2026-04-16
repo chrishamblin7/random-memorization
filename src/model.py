@@ -82,6 +82,10 @@ class MemorizationTransformer(nn.Module):
     """Bidirectional transformer encoder for memorization.
 
     Reads input_len tokens, outputs logits for the last output_len positions.
+    Uses learned positional embeddings PLUS RoPE so that position information
+    flows into values (not just Q/K). Without this, binary-vocab inputs produce
+    only 2 distinct value vectors across all positions, making sequence
+    identification impossible.
     """
 
     def __init__(
@@ -104,6 +108,7 @@ class MemorizationTransformer(nn.Module):
         self.head_dim = d_model // n_heads
 
         self.tok_emb = nn.Embedding(input_vocab_size, d_model)
+        self.pos_emb = nn.Embedding(input_len, d_model)
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, n_heads, d_ff, dropout)
             for _ in range(n_layers)
@@ -119,7 +124,8 @@ class MemorizationTransformer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T = x.shape
-        h = self.tok_emb(x)
+        pos = torch.arange(T, device=x.device)
+        h = self.tok_emb(x) + self.pos_emb(pos)
 
         rope_cos, rope_sin = _build_rope_cache(T, self.head_dim, x.device)
         for block in self.blocks:
