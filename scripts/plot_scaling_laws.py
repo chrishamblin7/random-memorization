@@ -113,8 +113,12 @@ def _fit_power_law(x, y):
         return None
 
 
-def discover_scaling_runs(results_root):
-    """Find runs matching the L-shaped sweep naming convention."""
+def discover_scaling_runs(results_root, filter_input_len=128):
+    """Find runs matching the L-shaped sweep naming convention.
+
+    Only includes runs with the specified input_len to avoid picking up
+    results from other sweeps that share the same (n_examples, d_ff).
+    """
     runs = {}
     pattern = re.compile(r"mlp_N(\d+)k_L(\d+)_D(\d+)_b([\d.]+)_s(\d+)")
     for d in sorted(results_root.iterdir()):
@@ -127,6 +131,8 @@ def discover_scaling_runs(results_root):
         il = int(m.group(2))
         dff = int(m.group(3))
         beta = float(m.group(4))
+        if filter_input_len is not None and il != filter_input_len:
+            continue
         cfg, metrics = load_run(d)
         if cfg is None:
             continue
