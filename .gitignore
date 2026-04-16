@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Training artifacts (large)
+results/*/checkpoints/
+results/*/model_final.pt
+results/*/metrics.json
+results/*/sampler_probs.json
+
+# Wandb
+wandb/
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
